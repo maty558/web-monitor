@@ -22,9 +22,9 @@ const PORT = 3000;
 
 // 1. Nastavenia monitoringu
 const monitory = [];
-const komuPoslat = "matyvoman@gmail.com";
+let komuPoslat = "";
 const intervalSekund = 60;
-let emailOdoslany = {};
+let emailOdoslany = {};  // kľúč: "stranka|hladanyText" → true (odoslaný, nikdy neresotovať)
 
 // 2. Email
 const transporter = nodemailer.createTransport({
@@ -36,6 +36,10 @@ const transporter = nodemailer.createTransport({
 });
 
 async function posliEmail(sprava) {
+    if (!komuPoslat) {
+        console.log("ℹ️  Email nie je nastavený, preskakujem.");
+        return;
+    }
     try {
         await transporter.sendMail({
             from: "Web Monitor <" + process.env.GMAIL_USER + ">",
@@ -43,7 +47,7 @@ async function posliEmail(sprava) {
             subject: "🔔 Web Monitor Alert",
             html: "<h1>🔔 Web Monitor</h1><p>" + sprava + "</p>"
         });
-        console.log("📧 Email odoslaný!");
+        console.log("📧 Email odoslaný na " + komuPoslat);
     } catch (chyba) {
         console.log("🚨 Email chyba: " + chyba.message);
     }
@@ -62,6 +66,7 @@ async function skontrolujVsetky() {
 async function skontrolujStranku(index) {
     const m = monitory[index];
     const cas = new Date().toLocaleTimeString("sk-SK");
+    const kluc = m.stranka + "|" + m.hladanyText;
     try {
         const odpoved = await fetch(m.stranka);
         const obsah = await odpoved.text();
@@ -71,15 +76,14 @@ async function skontrolujStranku(index) {
             m.stav = "✅ Nájdené";
             console.log("  ✅ " + m.stranka + " – nájdené!");
 
-            if (!emailOdoslany[m.stranka]) {
+            if (!emailOdoslany[kluc]) {
                 await posliEmail(
                     "Slovo '<strong>" + m.hladanyText + "</strong>' nájdené na " + m.stranka
                 );
-                emailOdoslany[m.stranka] = true;
+                emailOdoslany[kluc] = true;
             }
         } else {
             m.stav = "❌ Nenájdené";
-            emailOdoslany[m.stranka] = false;
             console.log("  ❌ " + m.stranka + " – nenájdené.");
         }
 
@@ -159,10 +163,25 @@ app.delete("/api/zmaz/:index", function (req, res) {
     var index = parseInt(req.params.index);
     if (index >= 0 && index < monitory.length) {
         var zmazana = monitory.splice(index, 1);
+        // Vymaž aj email tracking pre zmazanú stránku
+        var kluc = zmazana[0].stranka + "|" + zmazana[0].hladanyText;
+        delete emailOdoslany[kluc];
         res.json({ ok: true, zmazana: zmazana[0].stranka });
     } else {
         res.json({ chyba: "Neplatný index!" });
     }
+});
+
+// 9. API na nastavenie emailu
+app.get("/api/email", function (req, res) {
+    res.json({ email: komuPoslat });
+});
+
+app.post("/api/email", function (req, res) {
+    var email = req.body.email || "";
+    komuPoslat = email.trim();
+    console.log("📧 Email nastavený na: " + komuPoslat);
+    res.json({ ok: true, email: komuPoslat });
 });
 
 // 5. Spusti server
