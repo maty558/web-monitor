@@ -1,0 +1,79 @@
+const express = require('express');
+const Database = require('better-sqlite3');
+const puppeteer = require('puppeteer');
+
+const app = express();
+const PORT = process.env.PORT || 80;
+const db = new Database('monitor.db');
+
+db.exec(`CREATE TABLE IF NOT EXISTS monitors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT,
+    stranka TEXT,
+    klucove_slova TEXT,
+    cena_od REAL,
+    cena_do REAL,
+    stav TEXT DEFAULT 'caka',
+    posledna_kontrola TEXT,
+    notifikovane INTEGER DEFAULT 0
+)`);
+
+app.use(express.urlencoded({ extended: true }));
+
+async function skontrolujStranku(monitor) {
+    let browser;
+    try {
+        browser = await puppeteer.launch({ headless: 'new', executablePath: '/usr/bin/chromium-browser', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'] });
+        const page = await browser.newPage();
+        await page.goto(monitor.stranka, { waitUntil: 'networkidle2', timeout: 30000 });
+        const text = await page.evaluate(() => document.body.innerText.toLowerCase());
+        await browser.close();
+        const slova = monitor.klucove_slova.split(',').map(s => s.trim().toLowerCase());
+        const najdene = slova.filter(s => text.includes(s));
+        if (najdene.length === slova.length) {
+            if (monitor.cena_od || monitor.cena_do) {
+                const ceny = text.match(/(\d+[.,]?\d*)\s*€/g);
+                if (ceny) {
+                    const cisla = ceny.map(c => parseFloat(c.replace(',','.').replace('€','').trim()));
+                    const ok = cisla.some(c => { if (monitor.cena_od && c < monitor.cena_od) return false; if (monitor.cena_do && c > monitor.cena_do) return false; return true; });
+                    if (ok) return { stav: 'NAJDENE + CENA OK', najdene: true };
+                    else return { stav: 'NAJDENE, CENA MIMO', najdene: false };
+                }
+            }
+            return { stav: 'NAJDENE', najdene: true };
+        }
+        return { stav: 'NENAJDENE', najdene: false };
+    } catch (err) { if (browser) await browser.close(); return { stav: 'CHYBA: ' + err.message.substring(0,50), najdene: false }; }
+}
+const nodemailer = require('nodemailer');
+const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: 'roman.mateja@gmail.com', pass: 'lcar mmzf bhhw sjjr' } });
+
+async function posliEmail(komu, predmet, text) { try { await transporter.sendMail({ from: 'roman.mateja@gmail.com', to: komu, subject: predmet, html: text }); console.log('EMAIL ODOSLANY na ' + komu); } catch(e) { console.log('EMAIL CHYBA: ' + e.message); } }
+
+async function kontroluj() {
+    const monitors = db.prepare('SELECT * FROM monitors').all();
+    console.log('Kontrolujem ' + monitors.length + ' stranok...');
+    for (const m of monitors) {
+        const v = await skontrolujStranku(m);
+        db.prepare('UPDATE monitors SET stav = ?, posledna_kontrola = ? WHERE id = ?').run(v.stav, new Date().toISOString(), m.id);
+        console.log('  ' + v.stav + ' ' + m.stranka);
+        if (v.najdene && !m.notifikovane) { db.prepare('UPDATE monitors SET notifikovane = 1 WHERE id = ?').run(m.id); posliEmail(m.email, 'Web Monitor - ' + m.klucove_slova + ' NAJDENE!', '<h2>Nasli sme to!</h2><p>Stranka: ' + m.stranka + '</p><p>Slova: ' + m.klucove_slova + '</p><p>Stav: ' + v.stav + '</p><a href="' + m.stranka + '">Otvorit stranku</a>'); }
+    }
+}
+setInterval(kontroluj, 60000);
+kontroluj();
+
+app.get('/', (req, res) => {
+    const monitors = db.prepare('SELECT * FROM monitors').all();
+    res.send('<html><head><title>Web Monitor</title><meta charset=utf-8><style>body{font-family:Arial;max-width:1100px;margin:40px auto;padding:20px;background:#1a1a2e;color:#eee}h1{text-align:center}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:10px 8px;text-align:left;border-bottom:1px solid #333}th{background:#16213e}form{background:#16213e;padding:20px;border-radius:10px;margin-top:20px}input{padding:8px;margin:5px;border:1px solid #444;background:#1a1a2e;color:#eee;border-radius:5px}button{padding:10px 20px;background:#e94560;color:white;border:none;border-radius:5px;cursor:pointer;margin:5px}.del{background:#333;padding:5px 10px;color:#e94560;text-decoration:none;border-radius:5px}</style></head><body><h1>Web Monitor v2</h1><p style=text-align:center;color:#aaa>' + monitors.length + ' monitorov | <a href=/ style=color:#e94560>Obnovit</a></p><form method=POST action=/web/pridaj><h3>Pridat monitoring</h3><input name=email placeholder=Email required><input name=stranka placeholder=URL required><input name=klucove_slova placeholder=Klucove_slova required><input name=cena_od placeholder=Cena_od type=number step=0.01><input name=cena_do placeholder=Cena_do type=number step=0.01><button type=submit>Pridat</button></form><table><tr><th>Stranka</th><th>Slova</th><th>Cena</th><th>Stav</th><th>Kontrola</th><th>Email</th><th>X</th></tr>' + monitors.map(m => '<tr><td><a href=' + m.stranka + ' target=_blank style=color:#e94560>' + m.stranka + '</a></td><td>' + m.klucove_slova + '</td><td>' + (m.cena_od || m.cena_do ? (m.cena_od||0) + '-' + (m.cena_do||'max') + 'E' : '-') + '</td><td>' + m.stav + '</td><td>' + (m.posledna_kontrola || '-') + '</td><td>' + m.email + '</td><td><a href=/web/vymaz/' + m.id + ' class=del>X</a></td></tr>').join('') + '</table></body></html>');
+});
+
+app.post('/web/pridaj', (req, res) => {
+    let { email, stranka, klucove_slova, cena_od, cena_do } = req.body;
+    db.prepare('INSERT INTO monitors (email, stranka, klucove_slova, cena_od, cena_do) VALUES (?,?,?,?,?)').run(email, stranka, klucove_slova, cena_od||null, cena_do||null);
+    res.redirect('/');
+});
+
+app.get('/web/vymaz/:id', (req, res) => { db.prepare('DELETE FROM monitors WHERE id = ?').run(req.params.id); res.redirect('/'); });
+
+app.listen(PORT, '0.0.0.0', () => console.log('Web Monitor bezi na porte ' + PORT));

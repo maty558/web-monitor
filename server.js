@@ -1,8 +1,8 @@
 // 🌐 Web Monitor v2 – Inteligentný monitoring s cenami a notifikáciami
-require("dotenv").config({ quiet: true });
+require("dotenv").config();
 const express = require("express");
 const nodemailer = require("nodemailer");
-const cheerio = require("cheerio");
+const puppeteer = require("puppeteer");
 const Database = require("better-sqlite3");
 const admin = require("firebase-admin");
 
@@ -62,6 +62,7 @@ app.use(function (req, res, next) {
     next();
 });
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ═══════════════════════════════════════════
 // 📧 EMAIL
@@ -131,10 +132,9 @@ function najdiCeny(html) {
     const ceny = [];
     // Hľadá vzory: 50€, 50 €, €50, 50.99€, 50,99 €, 50 EUR, atď.
     const vzory = [
-        /(\d[\d\s]*[\d](?:[.,]\d{1,2})?)\s*€/g,
-        /€\s*(\d[\d\s]*[\d](?:[.,]\d{1,2})?)/g,
-        /(\d[\d\s]*[\d](?:[.,]\d{1,2})?)\s*EUR/gi,
-        /(\d[\d\s]*[\d](?:[.,]\d{1,2})?)\s*Eur/g
+        /(\d(?:[\d\s]*\d)?(?:[.,]\d{1,2})?)\s*€/g,
+        /€\s*(\d(?:[\d\s]*\d)?(?:[.,]\d{1,2})?)/g,
+        /(\d(?:[\d\s]*\d)?(?:[.,]\d{1,2})?)\s*EUR/gi
     ];
 
     for (const vzor of vzory) {
@@ -154,19 +154,20 @@ function najdiCeny(html) {
 // Skontroluj jednu stránku
 async function skontrolujMonitor(monitor) {
     const cas = new Date().toISOString();
+    let browser;
 
     try {
-        const odpoved = await fetch(monitor.stranka, {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+        browser = await puppeteer.launch({
+            executablePath: "/snap/bin/chromium",
+            headless: "new",
+            args: ["--no-sandbox", "--disable-setuid-sandbox"]
         });
-        const html = await odpoved.text();
-        const $ = cheerio.load(html);
-
-        // Odstráň skripty a štýly, pracuj s čistým textom
-        $("script, style").remove();
-        const cistyText = $.text().toLowerCase();
+        const page = await browser.newPage();
+        await page.goto(monitor.stranka, { waitUntil: "networkidle2", timeout: 30000 });
+        const html = await page.content();
+        const cistyText = await page.evaluate(function() { return document.body.innerText.toLowerCase(); });
+        await browser.close();
+        browser = null;
 
         // 1. Skontroluj kľúčové slová
         const slova = monitor.klucove_slova.toLowerCase().split(",").map(function(s) { return s.trim(); });
@@ -240,6 +241,7 @@ async function skontrolujMonitor(monitor) {
         }
 
     } catch (chyba) {
+        if (browser) try { await browser.close(); } catch (_) {}
         db.prepare("UPDATE monitory SET stav = ?, posledna_kontrola = ? WHERE id = ?")
             .run("🚨 Chyba: " + chyba.message, cas, monitor.id);
         console.log("  🚨 [" + monitor.id + "] " + monitor.stranka + " – " + chyba.message);
@@ -295,8 +297,8 @@ app.post("/api/pridaj", function (req, res) {
     const uzivatel_id = req.body.uzivatel_id;
     const stranka = req.body.stranka;
     const klucove_slova = req.body.klucove_slova;
-    const cena_od = req.body.cena_od || null;
-    const cena_do = req.body.cena_do || null;
+    const cena_od = req.body.cena_od != null && req.body.cena_od !== "" ? Number(req.body.cena_od) : null;
+    const cena_do = req.body.cena_do != null && req.body.cena_do !== "" ? Number(req.body.cena_do) : null;
 
     if (!uzivatel_id || !stranka || !klucove_slova) {
         return res.json({ chyba: "Vyplň všetky povinné polia!" });
@@ -367,24 +369,30 @@ app.get("/api/stav", function (req, res) {
 // ═══════════════════════════════════════════
 // 🌐 WEBOVÝ DASHBOARD
 // ═══════════════════════════════════════════
+function escapeHtml(text) {
+    if (!text) return "";
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 app.get("/", function (req, res) {
     const monitory = db.prepare("SELECT m.*, u.email FROM monitory m JOIN uzivatelia u ON m.uzivatel_id = u.id ORDER BY m.id DESC").all();
 
     let riadky = "";
     for (const m of monitory) {
-        const cena = (m.cena_od || m.cena_do)
-            ? (m.cena_od || "?") + " – " + (m.cena_do || "?") + " €"
+        const cena = (m.cena_od != null || m.cena_do != null)
+            ? (m.cena_od != null ? m.cena_od : "?") + " – " + (m.cena_do != null ? m.cena_do : "?") + " €"
             : "–";
         const aktivny = m.aktivny ? "🟢" : "⏸️";
 
         riadky += "<tr>"
             + "<td>" + aktivny + "</td>"
-            + "<td>" + m.stranka + "</td>"
-            + "<td>" + m.klucove_slova + "</td>"
+            + '<td><a href="' + escapeHtml(m.stranka) + '" target="_blank" style="color:#e94560;">' + escapeHtml(m.stranka) + '</a></td>'
+            + "<td>" + escapeHtml(m.klucove_slova) + "</td>"
             + "<td>" + cena + "</td>"
-            + "<td>" + m.stav + "</td>"
-            + "<td>" + (m.posledna_kontrola || "–") + "</td>"
-            + "<td>" + m.email + "</td>"
+            + "<td>" + escapeHtml(m.stav) + "</td>"
+            + "<td>" + escapeHtml(m.posledna_kontrola || "–") + "</td>"
+            + "<td>" + escapeHtml(m.email) + "</td>"
+            + '<td><a href="/web/vymaz/' + m.id + '" class="del">✕</a></td>'
             + "</tr>";
     }
 
@@ -394,7 +402,7 @@ app.get("/", function (req, res) {
         <head>
             <title>🌐 Web Monitor v2</title>
             <meta charset="utf-8">
-            <meta http-equiv="refresh" content="10">
+            
             <style>
                 body { font-family: Arial; max-width: 1100px; margin: 40px auto; padding: 20px; background: #1a1a2e; color: #eee; }
                 h1 { text-align: center; }
@@ -407,6 +415,8 @@ app.get("/", function (req, res) {
                 input { padding: 8px; margin: 5px; border: 1px solid #444; background: #1a1a2e; color: #eee; border-radius: 5px; }
                 button { padding: 10px 20px; background: #e94560; color: white; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
                 button:hover { background: #c73e54; }
+                .del { background: #333; padding: 5px 10px; color: #e94560; text-decoration: none; border-radius: 5px; }
+                .del:hover { background: #444; }
                 .footer { text-align: center; margin-top: 30px; color: #666; }
             </style>
         </head>
@@ -415,7 +425,7 @@ app.get("/", function (req, res) {
             <p class="stats">
                 📊 ${monitory.length} monitorov |
                 Kontrola každých 60s |
-                Stránka sa obnoví každých 10s
+                <a href="/" style="color:#e94560;">🔄 Obnoviť</a>
             </p>
 
             <form method="POST" action="/web/pridaj">
@@ -437,17 +447,28 @@ app.get("/", function (req, res) {
                     <th>Stav</th>
                     <th>Posledná kontrola</th>
                     <th>Email</th>
+                    <th>🗑️</th>
                 </tr>
                 ${riadky}
             </table>
-            <p class="footer">Web Monitor v2 | ⛔ Server zastavíš cez Ctrl+C</p>
+            <p class="footer">Web Monitor v2 | Puppeteer powered 🚀</p>
         </body>
         </html>
     `);
 });
 
+// Webové mazanie monitoru z dashboardu
+app.get("/web/vymaz/:id", function (req, res) {
+    const id = parseInt(req.params.id);
+    const monitor = db.prepare("SELECT * FROM monitory WHERE id = ?").get(id);
+    if (monitor) {
+        db.prepare("DELETE FROM historia WHERE monitor_id = ?").run(id);
+        db.prepare("DELETE FROM monitory WHERE id = ?").run(id);
+    }
+    res.redirect("/");
+});
+
 // Webový formulár na pridanie
-app.use(express.urlencoded({ extended: true }));
 app.post("/web/pridaj", function (req, res) {
     const email = req.body.email;
     const stranka = req.body.stranka;
@@ -488,7 +509,6 @@ app.listen(PORT, "0.0.0.0", function () {
     console.log("═══════════════════════════════════════");
     console.log("🌐 Web Monitor v2 beží!");
     console.log("🖥️  Dashboard: http://localhost:" + PORT);
-    console.log("📱 Pre telefón: http://192.168.100.2:" + PORT);
     console.log("═══════════════════════════════════════");
 
     skontrolujVsetky();
