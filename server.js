@@ -410,6 +410,12 @@ app.post("/login", function (req, res) {
     const email = req.body.email;
     if (!email) return res.redirect("/login");
 
+    // Validácia emailu
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.send("Neplatný email formát! <a href='/login'>Späť</a>");
+    }
+
     // Nájdi alebo vytvor používateľa
     let uzivatel = db.prepare("SELECT * FROM uzivatelia WHERE email = ?").get(email);
     if (!uzivatel) {
@@ -420,7 +426,8 @@ app.post("/login", function (req, res) {
     // Ulož email do cookie na 30 dní
     res.cookie("user_email", email, { 
         maxAge: 30 * 24 * 60 * 60 * 1000,
-        httpOnly: true 
+        httpOnly: true,
+        sameSite: "lax"
     });
     res.redirect("/");
 });
