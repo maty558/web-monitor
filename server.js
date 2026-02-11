@@ -1,6 +1,7 @@
 // 🌐 Web Monitor v2 – Inteligentný monitoring s cenami a notifikáciami
 require("dotenv").config();
 const express = require("express");
+const cookieParser = require("cookie-parser");
 const nodemailer = require("nodemailer");
 const puppeteer = require("puppeteer");
 const Database = require("better-sqlite3");
@@ -63,6 +64,7 @@ app.use(function (req, res, next) {
 });
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 // ═══════════════════════════════════════════
 // 📧 EMAIL
@@ -374,8 +376,77 @@ function escapeHtml(text) {
     return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// --- Prihlásenie ---
+app.get("/login", function (req, res) {
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>🔐 Prihlásenie – Web Monitor</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial; max-width: 400px; margin: 100px auto; padding: 20px; background: #1a1a2e; color: #eee; }
+                h1 { text-align: center; }
+                form { background: #16213e; padding: 30px; border-radius: 10px; margin-top: 20px; }
+                input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #444; background: #1a1a2e; color: #eee; border-radius: 5px; box-sizing: border-box; }
+                button { width: 100%; padding: 12px; background: #e94560; color: white; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px; font-size: 16px; }
+                button:hover { background: #c73e54; }
+                .info { text-align: center; color: #aaa; margin-top: 20px; font-size: 14px; }
+            </style>
+        </head>
+        <body>
+            <h1>🔐 Prihlásenie</h1>
+            <form method="POST" action="/login">
+                <input name="email" type="email" placeholder="Zadaj svoj email" required autofocus>
+                <button type="submit">🔓 Prihlásiť sa</button>
+            </form>
+            <p class="info">Zadaj email pre prihlásenie alebo vytvorenie nového účtu</p>
+        </body>
+        </html>
+    `);
+});
+
+app.post("/login", function (req, res) {
+    const email = req.body.email;
+    if (!email) return res.redirect("/login");
+
+    // Nájdi alebo vytvor používateľa
+    let uzivatel = db.prepare("SELECT * FROM uzivatelia WHERE email = ?").get(email);
+    if (!uzivatel) {
+        const result = db.prepare("INSERT INTO uzivatelia (email) VALUES (?)").run(email);
+        uzivatel = { id: result.lastInsertRowid, email: email };
+    }
+
+    // Ulož email do cookie na 30 dní
+    res.cookie("user_email", email, { 
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        httpOnly: true 
+    });
+    res.redirect("/");
+});
+
+// --- Odhlásenie ---
+app.get("/logout", function (req, res) {
+    res.clearCookie("user_email");
+    res.redirect("/login");
+});
+
 app.get("/", function (req, res) {
-    const monitory = db.prepare("SELECT m.*, u.email FROM monitory m JOIN uzivatelia u ON m.uzivatel_id = u.id ORDER BY m.id DESC").all();
+    // Overenie prihlásenia
+    const userEmail = req.cookies.user_email;
+    if (!userEmail) {
+        return res.redirect("/login");
+    }
+
+    // Overenie existencie používateľa v DB
+    const uzivatel = db.prepare("SELECT * FROM uzivatelia WHERE email = ?").get(userEmail);
+    if (!uzivatel) {
+        res.clearCookie("user_email");
+        return res.redirect("/login");
+    }
+
+    // Načítaj LEN monitory prihláseného používateľa
+    const monitory = db.prepare("SELECT * FROM monitory WHERE uzivatel_id = ? ORDER BY id DESC").all(uzivatel.id);
 
     let riadky = "";
     for (const m of monitory) {
@@ -391,7 +462,6 @@ app.get("/", function (req, res) {
             + "<td>" + cena + "</td>"
             + "<td>" + escapeHtml(m.stav) + "</td>"
             + "<td>" + escapeHtml(m.posledna_kontrola || "–") + "</td>"
-            + "<td>" + escapeHtml(m.email) + "</td>"
             + '<td><a href="/web/vymaz/' + m.id + '" class="del">✕</a></td>'
             + "</tr>";
     }
@@ -406,6 +476,9 @@ app.get("/", function (req, res) {
             <style>
                 body { font-family: Arial; max-width: 1100px; margin: 40px auto; padding: 20px; background: #1a1a2e; color: #eee; }
                 h1 { text-align: center; }
+                .user-bar { text-align: right; margin-bottom: 20px; color: #aaa; }
+                .user-bar a { color: #e94560; text-decoration: none; margin-left: 10px; }
+                .user-bar a:hover { text-decoration: underline; }
                 .stats { text-align: center; margin-bottom: 20px; color: #aaa; }
                 table { width: 100%; border-collapse: collapse; margin-top: 20px; }
                 th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid #333; font-size: 14px; }
@@ -421,6 +494,9 @@ app.get("/", function (req, res) {
             </style>
         </head>
         <body>
+            <div class="user-bar">
+                👤 ${escapeHtml(userEmail)} | <a href="/logout">🚪 Odhlásiť sa</a>
+            </div>
             <h1>🌐 Web Monitor v2</h1>
             <p class="stats">
                 📊 ${monitory.length} monitorov |
@@ -430,7 +506,6 @@ app.get("/", function (req, res) {
 
             <form method="POST" action="/web/pridaj">
                 <h3>➕ Pridať nový monitoring</h3>
-                <input name="email" placeholder="Tvoj email" required>
                 <input name="stranka" placeholder="URL stránky (napr. pelikan.sk)" required>
                 <input name="klucove_slova" placeholder="Kľúčové slová (oddelené čiarkou)" required>
                 <input name="cena_od" placeholder="Cena od (€)" type="number" step="0.01">
@@ -446,7 +521,6 @@ app.get("/", function (req, res) {
                     <th>Cenový rozsah</th>
                     <th>Stav</th>
                     <th>Posledná kontrola</th>
-                    <th>Email</th>
                     <th>🗑️</th>
                 </tr>
                 ${riadky}
@@ -459,8 +533,21 @@ app.get("/", function (req, res) {
 
 // Webové mazanie monitoru z dashboardu
 app.get("/web/vymaz/:id", function (req, res) {
+    // Overenie prihlásenia
+    const userEmail = req.cookies.user_email;
+    if (!userEmail) {
+        return res.redirect("/login");
+    }
+
+    const uzivatel = db.prepare("SELECT * FROM uzivatelia WHERE email = ?").get(userEmail);
+    if (!uzivatel) {
+        res.clearCookie("user_email");
+        return res.redirect("/login");
+    }
+
     const id = parseInt(req.params.id);
-    const monitor = db.prepare("SELECT * FROM monitory WHERE id = ?").get(id);
+    // Povoliť mazanie len vlastných monitorov
+    const monitor = db.prepare("SELECT * FROM monitory WHERE id = ? AND uzivatel_id = ?").get(id, uzivatel.id);
     if (monitor) {
         db.prepare("DELETE FROM historia WHERE monitor_id = ?").run(id);
         db.prepare("DELETE FROM monitory WHERE id = ?").run(id);
@@ -470,25 +557,29 @@ app.get("/web/vymaz/:id", function (req, res) {
 
 // Webový formulár na pridanie
 app.post("/web/pridaj", function (req, res) {
-    const email = req.body.email;
+    // Overenie prihlásenia
+    const userEmail = req.cookies.user_email;
+    if (!userEmail) {
+        return res.redirect("/login");
+    }
+
+    const uzivatel = db.prepare("SELECT * FROM uzivatelia WHERE email = ?").get(userEmail);
+    if (!uzivatel) {
+        res.clearCookie("user_email");
+        return res.redirect("/login");
+    }
+
     const stranka = req.body.stranka;
     const klucove_slova = req.body.klucove_slova;
     const cena_od = req.body.cena_od ? parseFloat(req.body.cena_od) : null;
     const cena_do = req.body.cena_do ? parseFloat(req.body.cena_do) : null;
 
-    if (!email || !stranka || !klucove_slova) {
+    if (!stranka || !klucove_slova) {
         return res.send("Vyplň všetky povinné polia! <a href='/'>Späť</a>");
     }
 
     let url = stranka;
     if (!url.startsWith("http")) url = "https://" + url;
-
-    // Nájdi alebo vytvor používateľa
-    let uzivatel = db.prepare("SELECT * FROM uzivatelia WHERE email = ?").get(email);
-    if (!uzivatel) {
-        const result = db.prepare("INSERT INTO uzivatelia (email) VALUES (?)").run(email);
-        uzivatel = { id: result.lastInsertRowid };
-    }
 
     const result = db.prepare(
         "INSERT INTO monitory (uzivatel_id, stranka, klucove_slova, cena_od, cena_do) VALUES (?, ?, ?, ?, ?)"
