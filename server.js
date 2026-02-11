@@ -9,18 +9,19 @@ const app = express();
 // CORS – povoľ prístup z Flutter appky
 app.use(function (req, res, next) {
     res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    if (req.method === "OPTIONS") return res.sendStatus(200);
     next();
 });
+
+app.use(express.json());
 
 const PORT = 3000;
 // ☝️ Číslo "dvierok" cez ktoré sa pripojíš v prehliadači
 
 // 1. Nastavenia monitoringu
-const monitory = [
-    { stranka: "https://www.sme.sk", hladanyText: "Slovensko", stav: "⏳", cas: "-" },
-    { stranka: "https://www.aktuality.sk", hladanyText: "Slovensko", stav: "⏳", cas: "-" },
-];
+const monitory = [];
 const komuPoslat = "matyvoman@gmail.com";
 const intervalSekund = 60;
 let emailOdoslany = {};
@@ -54,33 +55,38 @@ async function skontrolujVsetky() {
     console.log("🔍 [" + cas + "] Kontrolujem všetky stránky...");
 
     for (let i = 0; i < monitory.length; i++) {
-        const m = monitory[i];
-        try {
-            const odpoved = await fetch(m.stranka);
-            const obsah = await odpoved.text();
-            m.cas = cas;
+        await skontrolujStranku(i);
+    }
+}
 
-            if (obsah.includes(m.hladanyText)) {
-                m.stav = "✅ Nájdené";
-                console.log("  ✅ " + m.stranka + " – nájdené!");
+async function skontrolujStranku(index) {
+    const m = monitory[index];
+    const cas = new Date().toLocaleTimeString("sk-SK");
+    try {
+        const odpoved = await fetch(m.stranka);
+        const obsah = await odpoved.text();
+        m.cas = cas;
 
-                if (!emailOdoslany[m.stranka]) {
-                    await posliEmail(
-                        "Slovo '<strong>" + m.hladanyText + "</strong>' nájdené na " + m.stranka
-                    );
-                    emailOdoslany[m.stranka] = true;
-                }
-            } else {
-                m.stav = "❌ Nenájdené";
-                emailOdoslany[m.stranka] = false;
-                console.log("  ❌ " + m.stranka + " – nenájdené.");
+        if (obsah.includes(m.hladanyText)) {
+            m.stav = "✅ Nájdené";
+            console.log("  ✅ " + m.stranka + " – nájdené!");
+
+            if (!emailOdoslany[m.stranka]) {
+                await posliEmail(
+                    "Slovo '<strong>" + m.hladanyText + "</strong>' nájdené na " + m.stranka
+                );
+                emailOdoslany[m.stranka] = true;
             }
-
-        } catch (chyba) {
-            m.stav = "🚨 Chyba";
-            m.cas = cas;
-            console.log("  🚨 " + m.stranka + " – chyba: " + chyba.message);
+        } else {
+            m.stav = "❌ Nenájdené";
+            emailOdoslany[m.stranka] = false;
+            console.log("  ❌ " + m.stranka + " – nenájdené.");
         }
+
+    } catch (chyba) {
+        m.stav = "🚨 Chyba";
+        m.cas = cas;
+        console.log("  🚨 " + m.stranka + " – chyba: " + chyba.message);
     }
 }
 
@@ -128,11 +134,41 @@ app.get("/api/stav", function (req, res) {
     res.json(monitory);
 });
 
+// 7. API na pridanie novej stránky
+app.post("/api/pridaj", function (req, res) {
+    var stranka = req.body.stranka;
+    var hladanyText = req.body.hladanyText;
+
+    if (!stranka || !hladanyText) {
+        return res.json({ chyba: "Vyplň obe polia!" });
+    }
+
+    monitory.push({
+        stranka: stranka,
+        hladanyText: hladanyText,
+        stav: "⏳ Čakám...",
+        cas: ""
+    });
+
+    skontrolujStranku(monitory.length - 1);
+    res.json({ ok: true });
+});
+
+// 8. API na zmazanie stránky
+app.delete("/api/zmaz/:index", function (req, res) {
+    var index = parseInt(req.params.index);
+    if (index >= 0 && index < monitory.length) {
+        var zmazana = monitory.splice(index, 1);
+        res.json({ ok: true, zmazana: zmazana[0].stranka });
+    } else {
+        res.json({ chyba: "Neplatný index!" });
+    }
+});
+
 // 5. Spusti server
-app.listen(PORT, function () {
+app.listen(PORT, "0.0.0.0", function () {
     console.log("🌐 Dashboard beží na: http://localhost:" + PORT);
-    console.log("👀 Monitorujem " + monitory.length + " stránok každých " + intervalSekund + "s");
-    console.log("⛔ Pre zastavenie stlač Ctrl+C");
+    console.log("📱 Pre telefón: http://192.168.100.2:" + PORT);
 
     skontrolujVsetky();
     setInterval(skontrolujVsetky, intervalSekund * 1000);

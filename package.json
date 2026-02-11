@@ -2,7 +2,6 @@
   "dependencies": {
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
-    "nodemailer": "^8.0.1",
-    "resend": "^6.9.1"
+    "nodemailer": "^8.0.1"
   }
 }
